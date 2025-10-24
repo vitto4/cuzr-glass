@@ -1,0 +1,244 @@
+# ┌──────────────────────────────────────────────────────────────────┐
+# │                                                                  │
+# │                             LAMMPS                               │
+# │                  CuZr Metallic Glass Simulation                  │
+# │                                                                  │
+# │                        MATNUM — INSA Lyon                        │
+# │                          2024 - 2025                             │
+# │                                                                  │
+# │                               ***                                │
+# │                                *                                 │
+# │  lmp -in cuzr-glass.lmp                 LAMMPS Ver.: 4 Feb 2025  │
+# └──────────────────────────────────────────────────────────────────┘
+
+
+variable        STEP equal 1                                    # Little mechanism we set up for convenience purposes
+                                                                # Which part of the simulation should the script run ?
+                                                                # * `1` : box creation and stabilisation only
+                                                                # * `2` : quenching simulation only
+                                                                # * `3` : rdf computation only
+                                                                #
+                                                                # Note : You'll have to run each step individually, i.e. three
+                                                                #        different executions to run the whole simulation.
+
+#### Init
+
+dimension       3
+boundary        p p p                                           # Periodic for all dimensions
+atom_style      atomic
+units           metal
+shell           mkdir out                                       # Output folder
+
+
+#### Simulation parameters
+
+variable        AVOG equal 6.022e23                             # Avogadro number
+variable        MCU equal 63.5                                  # Copper molar mass g.mol-1
+variable        MZR equal 91.2                                  # Zirconium molar mass g.mol-1
+
+variable        DENS equal 7                                    # CuZr density in g.cm-3
+variable        PCU equal .64                                   # Cu proportion : usually .64 or .5
+variable        PZR equal 1 - ${PCU}                            # Zr proportion : usually .36 or .5
+
+variable        L equal 2e1                                     # Simulation box length (Å)
+variable        DT equal 1e-3                                   # Time interval (ps). Prof says "from literature"
+
+variable        T_INIT equal 1500                               # Temperature before quenching (K)
+variable        T_QUENCH equal 300                              # Temperature after quenching (K)
+variable        PRESSURE equal 1                                # Pressure (bar)
+variable        V_I equal 2*${T_INIT}                           # Atoms initial velocity (K)
+                                                                # (or target temperature, really)
+                                                                # Prof says formula "from literature"
+
+variable        PCU_DISP equal ${PCU} * 100                     # Used to display in percentages instead of fraction, for filenames
+variable        PZR_DISP equal ${PZR} * 100                     # Used to display in percentages instead of fraction, for filenames
+
+variable        MAVG equal (${PCU} * ${MCU} + ${PZR} * ${MZR})      # Average molar mass of resulting metallic glass
+
+variable        MOL_DENS equal ${DENS} / ${MAVG}                    # Atomic density in mol.cm-3
+variable        AT_DENS equal ${MOL_DENS} * ${AVOG} * 1e-24         # Atomic density in at.Å-3
+variable        NAT_CU equal floor(${PCU} * ${AT_DENS} * ${L}^3)    # Number of copper atoms in the box
+variable        NAT_ZR equal floor(${PZR} * ${AT_DENS} * ${L}^3)    # Number of zirconium atoms in the box
+
+
+#### Control flow
+
+if "${STEP} == 2" then "jump SELF quench" &
+elif "${STEP} == 3" "jump SELF rdf"
+
+# -------------------------------------------------------------------------- #
+#                       Box creation and stabilisation                       #
+# -------------------------------------------------------------------------- #
+
+#### Simulation box
+
+print "Creating ${NAT_CU} atoms of Cu (prop. ${PCU}) ; ${NAT_ZR} atoms of Zr (prop. ${PZR})."
+
+region          mybox block .0 ${L} .0 ${L} .0 ${L}
+create_box      2 mybox                                 # 2 atom types (AT)
+create_atoms    1 random ${NAT_CU} 9877836 mybox        # Place Cu atoms at random with seed `9877836`
+create_atoms    2 random ${NAT_ZR} 8769862 mybox        # Place Zr atoms at random with seed `8769862`
+
+
+#### Potential
+
+pair_style      eam/fs
+pair_coeff      * * assets/Cu-Zr_2.eam.fs Cu Zr         # This is what actually makes our Cu and Zr atoms different.
+                                                        # Before this, they were just numbers (Cu is AT n°1, Zr is n°2).
+                                                        # Args `Cu Zr` assigns potential of Cu to AT n°1, and of Zr to n°2.
+                                                        # Source : https://www.ctcms.nist.gov/potentials/entry/2009--Mendelev-M-I-Kramer-M-J-Ott-R-T-et-al--Cu-Zr/ 
+
+
+#### Units
+
+mass            1 ${MCU}                    # Copper
+mass            2 ${MZR}                    # Zircon
+
+# Save the current state of the simulation
+write_data      out/cuzr_${PCU_DISP}_${PZR_DISP}_box_init.dat
+
+#### Box energy minimisation
+
+min_style       cg                          # Energy minimisation style
+min_modify      dmax .2 line quadratic      # Max displacement of atoms during minimisation
+minimize        1e-6 1e-6 1000 10000        # Same tolerances for force and energy : `1e-6`
+                                            # Try at most 1000 iterations on energy, 10000 iterations on force
+
+
+#### Box stabilisation
+
+timestep        ${DT}
+
+# Initial velocities, apply to all atoms, following a gaussian distribution
+velocity        all create ${V_I} 8970678 dist gaussian
+
+# Logs
+thermo          10                          # Log every _ steps
+thermo_style    custom step etotal pe ke press vol
+log             out/cuzr_${PCU_DISP}_${PZR_DISP}_box_stabilised.log
+
+# Fix that'll keep the pressure and temp constant over all atoms
+# `1` is relaxation, proportional to the number of timesteps before re-applying set temp/pressure constraint
+#
+# Prof says : 1 should do but in general -->
+#   * not too low (excessive constraints will make the system unstable)
+#   * not too high (will take much time before reaching target temp/pressure)
+fix             fixNPT all npt temp ${T_INIT} ${T_INIT} 1 iso ${PRESSURE} ${PRESSURE} 1
+
+
+# Thermodata extraction -- to monitor for thermodynamic stability
+variable        Ec equal ke         # Kinetic energy
+variable        t equal step        # Time step
+variable        Ep equal pe         # Potential energy
+variable        T equal temp
+variable        P equal press       # May fluctuate a bunch, but so long as the extreme negatives and positives are equal, it's fine 
+                                    # Maybe caused by the barostat used not being adapted to systems on such a small scale (?)
+variable        V equal vol
+variable        d equal density
+
+# Dump thermodata for `all` AT, every `100` timesteps
+fix             fixLogs all print 100 "${t} ${T} ${Ec} ${Ep} ${P} ${V} ${d}" file out/cuzr_${PCU_DISP}_${PZR_DISP}_box_stabilised_${T_INIT}_thermodata.txt
+
+# Dump atom positions (+ `id`and AT) every `10` timesteps ; to be analysed in OVITO for example
+dump            cuzr_stabilised all custom 10 out/cuzr_${PCU_DISP}_${PZR_DISP}_box_stabilised_${T_INIT}.dump.xyz id type x y z
+
+run             10000                                                           # Run the simulation for `10000` timesteps
+write_data      out/cuzr_${PCU_DISP}_${PZR_DISP}_box_stabilised_${T_INIT}.dat   # Save the current state of the simulation
+
+
+quit
+
+
+# -------------------------------------------------------------------------- #
+#                                   Quench                                   #
+# -------------------------------------------------------------------------- #
+
+label           quench
+
+read_data       out/cuzr_${PCU_DISP}_${PZR_DISP}_box_stabilised_${T_INIT}.dat   # Resume by loading state from previous step
+
+#### Potential
+
+pair_style      eam/fs                              # We need to set these once again because the jump to label `quench`
+pair_coeff      * * assets/Cu-Zr_2.eam.fs Cu Zr     # occurs before the part where we first defined the potential.
+                                                    # The label is placed this way because `read_data` cannot be used after
+                                                    # `create_box`, and `pair_style` must be used after either `create_box` or `create_box`.
+
+#### Quench simulation
+
+timestep        ${DT}
+
+# Logs
+thermo          10
+thermo_style    custom step etotal pe ke press vol
+log             out/cuzr_${PCU_DISP}_${PZR_DISP}_quench.log
+
+# First fix of the quench, lowers the temperature from `T_INIT` to `T_QUENCH`
+fix             fixQuench all npt temp ${T_INIT} ${T_QUENCH} 1 iso ${PRESSURE} ${PRESSURE} 1
+
+variable        Ec equal ke
+variable        t equal step
+variable        Ep equal pe
+variable        T equal temp
+variable        P equal press
+variable        V equal vol
+variable        d equal density
+
+# Dump thermodata for `all` AT, every `100` timesteps
+fix             fixLogs all print 100 "${t} ${T} ${Ec} ${Ep} ${P} ${V} ${d}" file out/cuzr_${PCU_DISP}_${PZR_DISP}_quench_${T_INIT}_${T_QUENCH}_thermodata.txt
+
+dump            cuzr_quench all custom 10 out/cuzr_${PCU_DISP}_${PZR_DISP}_quench_${T_INIT}_${T_QUENCH}.dump.xyz id type x y z
+run             20000
+
+# Trick : unfix the quench and force the target temp on the system to ensure `T_QUENCH` is actually reached
+unfix           fixQuench
+fix             fixQuench2 all npt temp ${T_QUENCH} ${T_QUENCH} 1 iso ${PRESSURE} ${PRESSURE} 1
+
+# Run the quench simulation for an additional 5000 steps for our little trick to take effect
+run             5000
+write_data      out/cuzr_${PCU_DISP}_${PZR_DISP}_quench_${T_INIT}_${T_QUENCH}.dat
+
+quit
+
+
+# -------------------------------------------------------------------------- #
+#                        Radial distribution function                        #
+# -------------------------------------------------------------------------- #
+
+#    Compute the radial distribution function (RDF, or $g(r)$ ) of our system
+#    This is so that we can check the validity of our results against existing publications
+#    See : https://en.wikipedia.org/wiki/Radial_distribution_function
+
+label           rdf
+
+read_data       out/cuzr_${PCU_DISP}_${PZR_DISP}_quench_${T_INIT}_${T_QUENCH}.dat
+
+#### Potential
+
+pair_style      eam/fs
+pair_coeff      * * assets/Cu-Zr_2.eam.fs Cu Zr
+
+#### Computations
+
+# Computes g(r) for all atom types :
+#   * Taking all (Cu and Zr) atoms into account
+#   * Taking only Cu (AT n°1) atoms into account
+#   * Counting only Cu atoms (AT n°1) from Zr atoms
+#     Zr atoms will then be located at the r=0 abscissa on the graph
+#     >> Notice we don't do the opposite (Zr from Cu atoms), that is because the two are equivalent
+#   * Taking only Zr (AT n°2) atoms into account
+# 
+# We also set `Nbins` to 100, meaning 100 points on the final curve
+# * This compute generates coordination numbers as well (every second column in the output file)
+compute         cuzrRDF all rdf 100 * * 1 1 1 2 2 1 2 2
+
+# This is a bit of a hack to dump the RDF, see https://docs.lammps.org/compute_rdf.html
+# TL;DR we're asking for an average value of the RDF every two time steps, over one time step.
+#
+# Note : `c_cuzrRDF[*]` is just syntactic sugar to select all columns from the array
+# See : https://docs.lammps.org/fix_ave_time.html#description
+fix             fixRDF all ave/time 1 1 2 c_cuzrRDF[*] file out/cuzr_${PCU_DISP}_${PZR_DISP}_quenched_RDF_${T_INIT}_${T_QUENCH}.txt mode vector
+
+run             1       # Required to trigger the dump described above
+
+quit
