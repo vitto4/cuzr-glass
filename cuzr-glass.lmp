@@ -40,8 +40,11 @@ variable        DENS equal 7                                    # CuZr density i
 variable        PCU equal .64                                   # Cu proportion : usually .64 or .5
 variable        PZR equal 1 - ${PCU}                            # Zr proportion : usually .36 or .5
 
-variable        L equal 2e1                                     # Simulation box length (Å)
 variable        DT equal 1e-3                                   # Time interval (ps). Prof says "from literature"
+variable        L equal 2e1                                     # Simulation box length (Å)
+                                                                # Note : 20³ Å³ is a very small volume, and only gives us about
+                                                                # 450 atoms to work with. If you run the code yourself, you might
+                                                                # want to set L to 4e1 or more.
 
 variable        T_INIT equal 1500                               # Temperature before quenching (K)
 variable        T_QUENCH equal 300                              # Temperature after quenching (K)
@@ -143,6 +146,11 @@ fix             fixLogs all print 100 "${t} ${T} ${Ec} ${Ep} ${P} ${V} ${d}" fil
 dump            cuzr_stabilised all custom 10 out/cuzr_${PCU_DISP}_${PZR_DISP}_box_stabilised_${T_INIT}.dump.xyz id type x y z
 
 run             10000                                                           # Run the simulation for `10000` timesteps
+                                                                                # Note : this `run` (as well as all others in this file)
+                                                                                # is set to a very low number of timesteps (one step is one femtosecond). 
+                                                                                # While we found the results didn't vary significantly, doing a 10x or 25x on the number of
+                                                                                # timesteps in all the `run` wouldn't be a bad idea if you can spare the extra simulation time.
+
 write_data      out/cuzr_${PCU_DISP}_${PZR_DISP}_box_stabilised_${T_INIT}.dat   # Save the current state of the simulation
 
 
@@ -230,7 +238,7 @@ pair_coeff      * * assets/Cu-Zr_2.eam.fs Cu Zr
 # 
 # We also set `Nbins` to 100, meaning 100 points on the final curve
 # * This compute generates coordination numbers as well (every second column in the output file)
-compute         cuzrRDF all rdf 100 * * 1 1 1 2 2 1 2 2
+compute         cuzrRDF all rdf 225 * * 1 1 1 2 2 2
 
 # This is a bit of a hack to dump the RDF, see https://docs.lammps.org/compute_rdf.html
 # TL;DR we're asking for an average value of the RDF every two time steps, over one time step.
